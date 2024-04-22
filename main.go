@@ -25,6 +25,7 @@ type Config struct {
 		ApplicationIntent  string `json:"applicationIntent"`
 		ApplicationName    string `json:"applicationName"`
 	} `json:"database"`
+	QueryPath string `json:"queryPath"`
 }
 
 type Period struct {
@@ -133,6 +134,10 @@ func main() {
 	defer db.Close()
 
 	// fetch data
+	periods, err := fetchPeriods(db, config.QueryPath)
+	if err != nil {
+		log.Fatalf("Failed to fetch periods from the database: %v", err)
+	}
 
 	// process data
 
