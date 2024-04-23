@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"time"
 
 	_ "github.com/denisenkom/go-mssqldb" // SQL server driver
@@ -151,8 +152,129 @@ func logRecordset(periods []Period, config *Config) error {
 		}
 		totalPeriodsLogged = count
 	}
-	fmt.Printf("All periods logged ocrrectly.\nPeriods logged: %v", totalPeriodsLogged)
+	fmt.Printf("All periods logged correctly.\nPeriods logged: %v\n", totalPeriodsLogged)
 	return nil
+}
+
+func SortPeriods(periods []Period) {
+	sort.Slice(periods, func(i, j int) bool {
+		if periods[i].ProdNum != periods[j].ProdNum {
+			return periods[i].ProdNum < periods[j].ProdNum
+		}
+		if periods[i].PeriodStart != periods[j].PeriodStart {
+			return periods[i].PeriodStart.Before(periods[j].PeriodStart)
+		}
+		if periods[i].PeriodPriority != periods[j].PeriodPriority {
+			return periods[i].PeriodPriority < periods[j].PeriodPriority
+		}
+		return true
+	})
+}
+
+func ProcessPeriods(periods []Period, debugMode bool) []Period {
+
+	SortPeriods(periods)
+	i := 0
+
+	for i < len(periods)-1 {
+		current := periods[i]
+		next := periods[i+1]
+		if debugMode {
+			fmt.Printf("\n\nCurrent period: prodnum %v starts %s ends %s priority %v\nNext period: prodnum %v starts %s ends %s priority %v\n",
+				current.ProdNum, current.PeriodStart.Format("2006-01-02"), current.PeriodEnd.Format("2006-01-02"), current.PeriodPriority,
+				next.ProdNum, next.PeriodStart.Format("2006-01-02"), next.PeriodEnd.Format("2006-01-02"), next.PeriodPriority)
+		}
+		if current.PeriodEnd.After(next.PeriodStart) {
+			// current period ends ater next one starts = OVERLAP
+			if debugMode {
+				fmt.Printf("  Overlap detected between current (ends on %s) and next period (starts on %s)\n", current.PeriodEnd.Format("2006-01-02"), next.PeriodStart.Format("2006-01-02"))
+			}
+			if current.PeriodPriority > next.PeriodPriority {
+				// current period is of lower priority (bigger number)
+				if debugMode {
+					fmt.Printf("  Current period has lower priority (%v) and next period has higher priority (%v)\n", current.PeriodPriority, next.PeriodPriority)
+				}
+				if current.PeriodEnd.After(next.PeriodEnd) {
+					// current period of lower priority ends after the next one = SPLIT current period
+					if debugMode {
+						fmt.Printf("  Current period ends (%s) after the next period ends (%s)\n", current.PeriodEnd.Format("2006-01-02"), next.PeriodEnd.Format("2006-01-02"))
+					}
+					// need to split the longer lower priority period into two,
+					// one that ends before the higher priority starts,
+					// and one that starts after the shorter higher priority period ends
+					// new period:
+					splitPeriod := Period{
+						ID:             current.ID,
+						PeriodStart:    next.PeriodEnd.Add(time.Hour * 24), // split period starts day after the next periods ends
+						PeriodEnd:      current.PeriodEnd,
+						Price:          current.Price,
+						ProdNum:        current.ProdNum,
+						PeriodPriority: current.PeriodPriority,
+					}
+					if debugMode {
+						fmt.Printf("  Adding a split period that starts on %s and ends on %s with priority %v, after the next period ends (%s)\n",
+							splitPeriod.PeriodStart.Format("2006-01-02"), splitPeriod.PeriodEnd.Format("2006-01-02"), splitPeriod.PeriodPriority, next.PeriodEnd.Format("2006-01-02"))
+					}
+					periods = append(periods, splitPeriod) // add the split period to processed array
+					// existing period adjusted:
+					current.PeriodEnd = next.PeriodStart.Add(-time.Hour * 24) // adjust current periods end to day before next one starts
+					if debugMode {
+						fmt.Printf("  Adjusting current period to end on %s with priority %v, after the next period starts (%s)\n",
+							current.PeriodEnd.Format("2006-01-02"), current.PeriodPriority, next.PeriodStart.Format("2006-01-02"))
+					}
+					periods[i] = current // update in the array
+				} else {
+					if debugMode {
+						fmt.Printf("  Current period ends (%s) before the next period ends (%s)\n", current.PeriodEnd.Format("2006-01-02"), next.PeriodEnd.Format("2006-01-02"))
+					}
+					// lower priority period that started earlier, needs to end before the higher priority period starts
+					current.PeriodEnd = next.PeriodStart.Add(-time.Hour * 24) // adjust current periods end to day before next one starts
+					if debugMode {
+						fmt.Printf("  Adjusting current period to end on %s with priority %v, after the next period starts (%s)\n",
+							current.PeriodEnd.Format("2006-01-02"), current.PeriodPriority, next.PeriodStart.Format("2006-01-02"))
+					}
+					periods[i] = current // update in the array
+				}
+			} else {
+				if debugMode {
+					fmt.Println("  Current period has higher priority and next period has lower priority")
+				}
+				if current.PeriodEnd.After(next.PeriodEnd) || current.PeriodEnd.Equal(next.PeriodEnd) {
+					if debugMode {
+						fmt.Println("  Current period ends after the next period ends. Next period will be removed")
+					}
+					// remove the lower priority next period entirely since the period with higher priority encompases the its entirety
+					// next = i+1
+					periods[i+1] = periods[len(periods)-1] // replace next period with last period in array
+					periods = periods[:len(periods)-1]     // replace array with its subset without the last element
+					if debugMode {
+						fmt.Print("  Removed entirely reduced period")
+						fmt.Println(next)
+					}
+				} else {
+					// if current higher priority period ends before the next one:
+					next.PeriodStart = current.PeriodEnd.Add(time.Hour * 24) // we adjust the next one to start after it
+					if debugMode {
+						fmt.Printf("  Adjusting next period to start on %s with priority %v, after the current period ends (%s)\n",
+							next.PeriodStart.Format("2006-01-02"), next.PeriodPriority, current.PeriodEnd.Format("2006-01-02"))
+					}
+					periods[i+1] = next // update in the array
+				}
+			}
+			if debugMode {
+				fmt.Println("* * * Resorting all results and starting period comparison from beginning * * *")
+			}
+			SortPeriods(periods)
+			i = 0 // start again from the top
+		} else {
+			if debugMode {
+				fmt.Printf("  No overlap between current (ends on %s) and next period (starts on %s)\n", current.PeriodEnd.Format("2006-01-02"), next.PeriodStart.Format("2006-01-02"))
+			}
+			// if no overlap, move to next item
+			i++
+		}
+	}
+	return periods
 }
 
 func main() {
@@ -208,6 +330,12 @@ func main() {
 	}
 
 	// process data
+	flattenedPeriods := ProcessPeriods(periods, config.Logging.DebugMode)
+
+	// log to file: log fetched data
+	if config.Logging.LogToFile {
+		logRecordset(flattenedPeriods, config)
+	}
 
 	// output processed data
 }
