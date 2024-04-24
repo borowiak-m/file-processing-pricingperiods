@@ -179,6 +179,11 @@ func ProcessPeriods(periods []Period, debugMode bool) []Period {
 	for i < len(periods)-1 {
 		current := periods[i]
 		next := periods[i+1]
+		if current.ProdNum != next.ProdNum {
+			// skip if two neighbouring entries are from different product
+			i++
+			continue
+		}
 		if debugMode {
 			fmt.Printf("\n\nCurrent period: prodnum %v starts %s ends %s priority %v\nNext period: prodnum %v starts %s ends %s priority %v\n",
 				current.ProdNum, current.PeriodStart.Format("2006-01-02"), current.PeriodEnd.Format("2006-01-02"), current.PeriodPriority,
@@ -280,9 +285,16 @@ func ProcessPeriods(periods []Period, debugMode bool) []Period {
 func main() {
 	// execution flag "-dev" for development environment variables
 	devFlag := flag.Bool("dev", false, "Set to true to run in development mode.")
+	// execution flag "-dev" for development environment variables
+	prodFlag := flag.Bool("prod", false, "Set to true to run in development mode.")
 	// execution flag "-debug" for enhanced logging
 	debugFlag := flag.Bool("debug", false, "Set true to run in debug mode.")
+
 	flag.Parse()
+
+	if !*devFlag && !*prodFlag {
+		log.Fatal("No environment flag was set (-dev or -prod)")
+	}
 
 	var envConfig string
 
@@ -290,7 +302,8 @@ func main() {
 	if *devFlag {
 		fmt.Println("Running in development mode")
 		envConfig = DEV_CONFIG
-	} else {
+	}
+	if *prodFlag {
 		fmt.Println("Running in production mode")
 		envConfig = PROD_CONFIG
 	}
